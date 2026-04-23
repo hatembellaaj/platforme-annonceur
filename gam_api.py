@@ -18,6 +18,7 @@ from googleads import ad_manager as ad_manager_sdk
 
 
 APP_DIR = Path(__file__).resolve().parent
+ROOT_DIR = APP_DIR.parent
 DEFAULT_API_VERSION = "v202508"
 
 
@@ -137,8 +138,11 @@ def _normalize_service_account_json(raw_text: str) -> str:
 def get_gam_client():
     key_json = _get_secret("GAM_SERVICE_ACCOUNT_JSON")
     key_file = APP_DIR / "gam-service-account.json"
+    fallback_key_file = ROOT_DIR / "gam_mcp" / "gam-service-account.json"
     if key_json:
         key_file.write_text(_normalize_service_account_json(key_json), encoding="utf-8")
+    elif not key_file.exists() and fallback_key_file.exists():
+        key_file = fallback_key_file
     if not key_file.exists():
         raise FileNotFoundError("Missing GAM service account JSON.")
 

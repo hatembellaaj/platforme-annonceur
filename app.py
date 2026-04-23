@@ -340,12 +340,13 @@ def render_admin_page(order_df: pd.DataFrame) -> None:
 
 def render_advertiser_page(advertiser_df: pd.DataFrame, campaign_df: pd.DataFrame) -> None:
     st.markdown('<div class="section-title">Page Annonceur</div>', unsafe_allow_html=True)
-    advertiser_options = advertiser_df["advertiser_name"].tolist()
+    active_advertisers = advertiser_df[advertiser_df["is_active"]].copy()
+    advertiser_options = active_advertisers["advertiser_name"].tolist()
     if not advertiser_options:
-        st.info("Aucune donnee annonceur disponible.")
+        st.info("Aucun annonceur actif disponible.")
         return
     selected_name = st.selectbox("Annonceur", advertiser_options)
-    advertiser_row = advertiser_df[advertiser_df["advertiser_name"] == selected_name].iloc[0]
+    advertiser_row = active_advertisers[active_advertisers["advertiser_name"] == selected_name].iloc[0]
     advertiser_id = str(advertiser_row["advertiser_id"])
     advertiser_campaigns = campaign_df[campaign_df["advertiser_id"].astype(str) == advertiser_id].copy()
     start_floor = pd.Timestamp.now().date() - timedelta(days=120)
@@ -509,8 +510,12 @@ def main() -> None:
         st.warning("Aucune donnee GAM n'a ete retournee pour la plateforme.")
         return
 
+    active_advertisers = advertiser_df[advertiser_df["is_active"]].copy()
+    active_advertiser_ids = set(active_advertisers["advertiser_id"].astype(str).tolist())
+    active_orders = order_df[order_df["advertiser_id"].astype(str).isin(active_advertiser_ids)].copy()
+
     page = st.sidebar.radio("Surface", options=["Admin", "Annonceur"])
-    st.sidebar.caption(f"Annonceurs : {len(advertiser_df)}")
+    st.sidebar.caption(f"Annonceurs actifs : {len(active_advertisers)}")
     st.sidebar.caption(f"Campagnes : {len(campaign_df)}")
     storage_mode = get_override_storage_mode()
     st.sidebar.caption(f"Stockage corrections : {'Supabase' if storage_mode == 'supabase' else 'Local'}")
@@ -518,9 +523,9 @@ def main() -> None:
         st.sidebar.warning("Supabase n'est pas configure. Le stockage local peut ne pas persister sur Streamlit Cloud.")
 
     if page == "Admin":
-        render_admin_page(order_df)
+        render_admin_page(active_orders)
     else:
-        render_advertiser_page(advertiser_df, campaign_df)
+        render_advertiser_page(active_advertisers, campaign_df)
 
 
 if __name__ == "__main__":
