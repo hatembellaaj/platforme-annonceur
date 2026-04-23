@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import tempfile
@@ -115,12 +116,29 @@ def _build_report_statement(campaign_ids: list[int], order_ids: list[int]) -> di
     return None
 
 
+def _normalize_service_account_json(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return text
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r'"private_key"\s*:\s*"(.*?)"\s*,\s*"client_email"', text, flags=re.S)
+        if not match:
+            raise
+        private_key_raw = match.group(1)
+        private_key_fixed = private_key_raw.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+        text = text[:match.start(1)] + private_key_fixed + text[match.end(1):]
+        payload = json.loads(text)
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 @lru_cache(maxsize=1)
 def get_gam_client():
     key_json = _get_secret("GAM_SERVICE_ACCOUNT_JSON")
     key_file = APP_DIR / "gam-service-account.json"
     if key_json:
-        key_file.write_text(key_json, encoding="utf-8")
+        key_file.write_text(_normalize_service_account_json(key_json), encoding="utf-8")
     if not key_file.exists():
         raise FileNotFoundError("Missing GAM service account JSON.")
 
