@@ -511,8 +511,7 @@ def main() -> None:
         return
 
     active_advertisers = advertiser_df[advertiser_df["is_active"]].copy()
-    active_advertiser_ids = set(active_advertisers["advertiser_id"].astype(str).tolist())
-    active_orders = order_df[order_df["advertiser_id"].astype(str).isin(active_advertiser_ids)].copy()
+    active_orders = order_df[order_df["is_active"]].copy()
 
     page = st.sidebar.radio("Surface", options=["Admin", "Annonceur"])
     st.sidebar.caption(f"Annonceurs actifs : {len(active_advertisers)}")
