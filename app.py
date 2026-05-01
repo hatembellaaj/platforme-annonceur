@@ -11,6 +11,7 @@ APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
+from ai_assistant import ask_gemini_assistant, assistant_ready, build_assistant_context  # noqa: E402
 from platform_data import (  # noqa: E402
     build_admin_table,
     build_admin_summary,
@@ -110,7 +111,8 @@ def render_formula_box() -> None:
             - `R = Q - C`
             - `S = R / Q`
             - La barre de progression est separee des alertes
-            - Les alertes suivent `R` et `S`, pas la barre de progression
+            - Les alertes suivent maintenant le pacing dans le temps:
+              `objectif attendu a date = objectif total * jours ecoules / duree totale`
             """
         )
 
@@ -237,6 +239,7 @@ def render_admin_page(order_df: pd.DataFrame) -> None:
         grain = st.radio(
             "Colonnes d'impressions",
             options=["day", "week", "month"],
+            index=2,
             horizontal=True,
             format_func=lambda value: {"day": "Jour", "week": "Semaine", "month": "Mois"}[value],
         )
@@ -360,6 +363,7 @@ def render_advertiser_page(advertiser_df: pd.DataFrame, campaign_df: pd.DataFram
         grain = st.radio(
             "Colonnes d'impressions",
             options=["day", "week", "month"],
+            index=2,
             horizontal=True,
             key="advertiser_grain",
             format_func=lambda value: {"day": "Jour", "week": "Semaine", "month": "Mois"}[value],
@@ -516,6 +520,165 @@ def render_advertiser_page(advertiser_df: pd.DataFrame, campaign_df: pd.DataFram
             st.dataframe(creatives_display, width="stretch", hide_index=True)
 
 
+def render_ai_tables_and_charts(payload: dict[str, object]) -> None:
+    for warning in payload.get("warnings", []) or []:
+        st.warning(str(warning))
+    tables = payload.get("tables", []) or []
+    for table in tables:
+        title = str(table.get("title", "") or "").strip()
+        columns = [str(item) for item in table.get("columns", []) or []]
+        rows = table.get("rows", []) or []
+        if title:
+            st.markdown(f"**{title}**")
+        if columns:
+            try:
+                frame = pd.DataFrame(rows, columns=columns)
+            except Exception:
+                continue
+            st.dataframe(frame, width="stretch", hide_index=True)
+    charts = payload.get("charts", []) or []
+    for chart in charts:
+        title = str(chart.get("title", "") or "").strip()
+        chart_type = str(chart.get("chart_type", "") or "").strip().lower()
+        points = chart.get("points", []) or []
+        if not points:
+            continue
+        frame = pd.DataFrame(points)
+        if frame.empty or "x" not in frame.columns or "y" not in frame.columns:
+            continue
+        if title:
+            st.markdown(f"**{title}**")
+        if "series" in frame.columns and frame["series"].notna().any():
+            pivot = frame.pivot_table(index="x", columns="series", values="y", aggfunc="sum").sort_index()
+            if chart_type == "bar":
+                st.bar_chart(pivot)
+            else:
+                st.line_chart(pivot)
+        else:
+            single = frame[["x", "y"]].copy().sort_values("x")
+            single = single.set_index("x")
+            if chart_type == "bar":
+                st.bar_chart(single)
+            else:
+                st.line_chart(single)
+
+
+def render_ai_assistant_page(advertiser_df: pd.DataFrame, order_df: pd.DataFrame, campaign_df: pd.DataFrame) -> None:
+    st.markdown('<div class="section-title">Assistant IA</div>', unsafe_allow_html=True)
+    if not assistant_ready():
+        st.warning("Cle Gemini absente. Ajoute `GAM_GEMINI_API_KEY` ou `GEMINI_API_KEY` dans les secrets Streamlit.")
+        return
+
+    start_floor = pd.Timestamp.now().date() - timedelta(days=120)
+    max_day = pd.Timestamp.now().date()
+    top1, top2, top3 = st.columns([1.1, 1.1, 1.2])
+    with top1:
+        scope = st.radio("Scope", options=["Global", "Annonceur"], horizontal=True, key="ai_scope")
+    with top2:
+        grain = st.radio(
+            "Grain",
+            options=["day", "week", "month"],
+            index=2,
+            horizontal=True,
+            key="ai_grain",
+            format_func=lambda value: {"day": "Jour", "week": "Semaine", "month": "Mois"}[value],
+        )
+    with top3:
+        interval = st.date_input(
+            "Intervalle",
+            value=(max(start_floor, max_day - timedelta(days=90)), max_day),
+            min_value=start_floor,
+            max_value=max_day,
+            key="ai_interval",
+        )
+    start_date, end_date = interval if isinstance(interval, tuple) else (start_floor, max_day)
+    selected_name = ""
+    if scope == "Annonceur":
+        advertiser_options = advertiser_df[advertiser_df["is_active"]]["advertiser_name"].tolist()
+        if not advertiser_options:
+            st.info("Aucun annonceur actif disponible.")
+            return
+        selected_name = st.selectbox("Annonceur cible", advertiser_options, key="ai_advertiser")
+
+    daily = build_daily_frame(fetch_gam_daily_report(start_date.isoformat(), end_date.isoformat(), advertiser_name=selected_name))
+    if scope == "Annonceur" and selected_name:
+        scoped_advertiser_df = advertiser_df[advertiser_df["advertiser_name"] == selected_name].copy()
+        if scoped_advertiser_df.empty:
+            st.info("Annonceur introuvable dans le scope actif.")
+            return
+        advertiser_row = scoped_advertiser_df.iloc[0]
+        advertiser_id = str(advertiser_row["advertiser_id"])
+        scoped_daily = daily[daily["advertiser_id"].astype(str) == advertiser_id].copy()
+        scoped_campaigns = campaign_df[campaign_df["advertiser_id"].astype(str) == advertiser_id].copy()
+        campaign_table_df, _, _ = build_campaign_table(scoped_daily, scoped_campaigns, advertiser_id, grain)
+        order_table_df = order_df[order_df["advertiser_id"].astype(str) == advertiser_id].copy()
+        creative_df = fetch_gam_creative_assignments(tuple(scoped_campaigns["campaign_id"].astype(str).tolist()))
+        context = build_assistant_context(
+            page_scope=scope,
+            selected_advertiser=selected_name,
+            grain=grain,
+            start_date_iso=start_date.isoformat(),
+            end_date_iso=end_date.isoformat(),
+            advertiser_df=scoped_advertiser_df,
+            order_table_df=order_table_df,
+            campaign_table_df=campaign_table_df,
+            creative_df=creative_df,
+            daily_df=scoped_daily,
+        )
+    else:
+        scoped_orders = order_df[order_df["is_active"]].copy()
+        order_table_df, _, _ = build_admin_table(daily, scoped_orders, grain)
+        campaign_table_df = campaign_df[campaign_df["is_active"]].copy()
+        creative_df = pd.DataFrame(columns=["campaign_id", "creative_id", "creative_name", "creative_start_date", "creative_end_date"])
+        context = build_assistant_context(
+            page_scope=scope,
+            selected_advertiser="",
+            grain=grain,
+            start_date_iso=start_date.isoformat(),
+            end_date_iso=end_date.isoformat(),
+            advertiser_df=advertiser_df[advertiser_df["is_active"]].copy(),
+            order_table_df=order_table_df,
+            campaign_table_df=campaign_table_df,
+            creative_df=creative_df,
+            daily_df=daily,
+        )
+
+    if "ai_chat_history" not in st.session_state:
+        st.session_state["ai_chat_history"] = []
+
+    action_col1, action_col2 = st.columns([1, 1])
+    with action_col1:
+        if st.button("Effacer la conversation", key="ai_clear_chat"):
+            st.session_state["ai_chat_history"] = []
+            st.rerun()
+    with action_col2:
+        st.caption("L'assistant repond uniquement avec les donnees chargees dans cette page.")
+
+    for message in st.session_state["ai_chat_history"]:
+        with st.chat_message("user"):
+            st.markdown(str(message.get("user", "")))
+        with st.chat_message("assistant"):
+            st.markdown(str(message.get("answer_markdown", "")))
+            render_ai_tables_and_charts(message)
+
+    prompt = st.chat_input("Pose une question sur les campagnes, les objectifs, les alertes, ou demande un tableau / graphique.")
+    if prompt:
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Analyse IA en cours..."):
+                try:
+                    history = [{"user": item.get("user", ""), "model": item.get("answer_markdown", "")} for item in st.session_state["ai_chat_history"]]
+                    payload = ask_gemini_assistant(prompt, context, history)
+                except Exception as exc:
+                    st.error(f"Assistant IA indisponible : {exc}")
+                    return
+            st.markdown(str(payload.get("answer_markdown", "")))
+            render_ai_tables_and_charts(payload)
+        st.session_state["ai_chat_history"].append({"user": prompt, **payload})
+        st.rerun()
+
+
 def main() -> None:
     inject_styles()
     ensure_state()
@@ -543,7 +706,7 @@ def main() -> None:
     active_advertisers = advertiser_df[advertiser_df["is_active"]].copy()
     active_orders = order_df[order_df["is_active"]].copy()
 
-    page = st.sidebar.radio("Surface", options=["Admin", "Annonceur"])
+    page = st.sidebar.radio("Surface", options=["Admin", "Annonceur", "Assistant IA"])
     st.sidebar.caption(f"Annonceurs actifs : {len(active_advertisers)}")
     st.sidebar.caption(f"Campagnes : {len(campaign_df)}")
     storage_mode = get_override_storage_mode()
@@ -553,8 +716,10 @@ def main() -> None:
 
     if page == "Admin":
         render_admin_page(active_orders)
-    else:
+    elif page == "Annonceur":
         render_advertiser_page(active_advertisers, campaign_df)
+    else:
+        render_ai_assistant_page(active_advertisers, active_orders, campaign_df)
 
 
 if __name__ == "__main__":

@@ -483,6 +483,64 @@ def compute_progress_ui(impressions: Any, objective: Any) -> tuple[float, float]
     return progress_raw, min(progress_raw, 100.0)
 
 
+def compute_expected_delivery(objective: Any, start_value: Any, end_value: Any, reference_day: date | None = None) -> dict[str, float]:
+    objective_value = safe_float(objective)
+    start_day = parse_iso_date(start_value)
+    end_day = parse_iso_date(end_value)
+    today = reference_day or pd.Timestamp.now().date()
+    if objective_value <= 0 or not start_day or not end_day or end_day < start_day:
+        return {
+            "expected_delivery": 0.0,
+            "elapsed_days": 0.0,
+            "total_days": 0.0,
+            "elapsed_ratio": 0.0,
+            "delivery_rate": 0.0,
+        }
+    total_days = max((end_day - start_day).days + 1, 0)
+    if total_days <= 0:
+        return {
+            "expected_delivery": 0.0,
+            "elapsed_days": 0.0,
+            "total_days": 0.0,
+            "elapsed_ratio": 0.0,
+            "delivery_rate": 0.0,
+        }
+    if today < start_day:
+        elapsed_days = 0
+    else:
+        effective_end = min(today, end_day)
+        elapsed_days = max((effective_end - start_day).days + 1, 0)
+    elapsed_ratio = min(max(elapsed_days / total_days, 0.0), 1.0)
+    expected_delivery = objective_value * elapsed_ratio
+    return {
+        "expected_delivery": round(expected_delivery, 2),
+        "elapsed_days": float(elapsed_days),
+        "total_days": float(total_days),
+        "elapsed_ratio": round(elapsed_ratio, 4),
+    }
+
+
+def compute_delivery_alert(is_active: bool, objective: Any, impressions: Any, start_value: Any, end_value: Any) -> str:
+    if not is_active:
+        return "Inactif"
+    pacing = compute_expected_delivery(objective, start_value, end_value)
+    expected_delivery = safe_float(pacing["expected_delivery"])
+    elapsed_ratio = safe_float(pacing["elapsed_ratio"])
+    delivered = safe_float(impressions)
+    if expected_delivery <= 0:
+        return "A verifier"
+    delivery_rate = delivered / expected_delivery if expected_delivery > 0 else 0.0
+    if delivered <= 0 and elapsed_ratio >= 0.15:
+        return "Critique"
+    if delivery_rate < 0.70:
+        return "Critique"
+    if delivery_rate < 0.90:
+        return "En retard"
+    if delivery_rate <= 1.10:
+        return "Dans le rythme"
+    return "En avance"
+
+
 def build_campaign_records(frame: pd.DataFrame, campaign_overrides: dict[str, dict[str, Any]]) -> pd.DataFrame:
     if frame.empty:
         return pd.DataFrame([asdict(record) for record in []])
@@ -537,7 +595,7 @@ def build_campaign_records(frame: pd.DataFrame, campaign_overrides: dict[str, di
                 duration_days=duration_days(effective_start, effective_end),
                 progress_pct_raw=progress_raw,
                 progress_pct_ui=progress_ui,
-                alert_label="Active" if effective_is_active else "Inactive",
+                alert_label=compute_delivery_alert(effective_is_active, objective_effective, impressions, effective_start, effective_end),
             )
         )
     return pd.DataFrame([asdict(record) for record in records]).sort_values(
@@ -592,7 +650,7 @@ def build_order_records(order_df: pd.DataFrame, campaign_df: pd.DataFrame, order
                 duration_days=duration_days(official_start, official_end),
                 progress_pct_raw=progress_raw,
                 progress_pct_ui=progress_ui,
-                alert_label="Active" if active_campaign_count > 0 else "Inactive",
+                alert_label=compute_delivery_alert(active_campaign_count > 0, objective_effective, impressions, official_start, official_end),
                 is_archived_source=bool(row.get("is_archived", False)),
             )
         )
@@ -636,7 +694,7 @@ def build_advertiser_records(order_df: pd.DataFrame) -> pd.DataFrame:
                 duration_days=duration_days(official_start, official_end),
                 progress_pct_raw=progress_raw,
                 progress_pct_ui=progress_ui,
-                alert_label="Active" if active_campaign_count > 0 else "Inactive",
+                alert_label=compute_delivery_alert(active_campaign_count > 0, objective_effective, total_impressions, official_start, official_end),
             )
         )
     return pd.DataFrame([asdict(record) for record in records]).sort_values(
@@ -777,16 +835,8 @@ def _count_total_periods(start_value: Any, end_value: Any, grain: str) -> int:
     return max(_get_period_key(pd.Series(date_range), grain).nunique(), 0)
 
 
-def compute_table_alert(is_active: bool, moyenne: float, ecart_periode: float) -> str:
-    if not is_active:
-        return "Inactif"
-    if moyenne <= 0:
-        return "Aucune diffusion"
-    if ecart_periode < 0:
-        return "En retard"
-    if ecart_periode > 0:
-        return "En avance"
-    return "Dans l'objectif"
+def compute_table_alert(is_active: bool, objective: Any, impressions: Any, start_value: Any, end_value: Any) -> str:
+    return compute_delivery_alert(is_active, objective, impressions, start_value, end_value)
 
 
 def _prepare_period_columns(filtered_daily: pd.DataFrame, group_cols: list[str], grain: str) -> tuple[pd.DataFrame, list[str], list[dict[str, Any]]]:
@@ -890,7 +940,13 @@ def _attach_period_metrics(
         axis=1,
     )
     table["alert_label"] = table.apply(
-        lambda item: compute_table_alert(str(item.get(status_col)) == "Active", safe_float(item["Q"]), safe_float(item["R"])),
+        lambda item: compute_table_alert(
+            str(item.get(status_col)) == "Active",
+            item.get(objective_col),
+            item.get("impressions"),
+            item.get(start_col),
+            item.get(end_col),
+        ),
         axis=1,
     )
     table["objective_label"] = labels["objective"]
@@ -905,6 +961,7 @@ def build_admin_table(filtered_daily: pd.DataFrame, order_df: pd.DataFrame, grai
         "advertiser_name",
         "active_campaign_count",
         "active_status_label",
+        "impressions",
         "official_start_date",
         "official_end_date",
         "duration_days",
@@ -938,6 +995,7 @@ def build_campaign_table(filtered_daily: pd.DataFrame, campaign_df: pd.DataFrame
         "source_status",
         "active_status_label",
         "is_active_override",
+        "impressions",
         "start_date_source",
         "start_date_override",
         "start_date",

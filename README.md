@@ -5,6 +5,7 @@
 It has two surfaces:
 - `Admin`
 - `Annonceur`
+- `Assistant IA`
 
 ## Data source
 
@@ -16,6 +17,11 @@ The app now uses direct GAM service-account access for:
 - order and campaign dates
 
 The admin table is designed to move on a GAM `order` model instead of the older advertiser aggregate model.
+
+The AI assistant uses:
+- the same GAM data already loaded into the app
+- Gemini API for analysis and response generation
+- structured outputs to render tables and charts in Streamlit
 
 ## Durable corrections
 
@@ -41,6 +47,7 @@ For Streamlit Cloud, add these secrets:
 GAM_NETWORK_CODE = "9167326"
 GAM_API_VERSION = "v202508"
 GAM_SERVICE_ACCOUNT_JSON = """{ ... full service account json ... }"""
+GAM_GEMINI_API_KEY = "..."
 ```
 
 Optional Supabase secrets for override persistence:
