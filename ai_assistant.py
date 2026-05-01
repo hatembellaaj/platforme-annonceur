@@ -65,24 +65,22 @@ def _compact_records(frame: pd.DataFrame, columns: list[str], limit: int) -> lis
 
 
 def build_assistant_context(
-    page_scope: str,
-    selected_advertiser: str,
     grain: str,
     start_date_iso: str,
     end_date_iso: str,
     advertiser_df: pd.DataFrame,
+    advertiser_table_df: pd.DataFrame,
     order_table_df: pd.DataFrame,
     campaign_table_df: pd.DataFrame,
     creative_df: pd.DataFrame,
     daily_df: pd.DataFrame,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
-        "page_scope": page_scope,
-        "selected_advertiser": selected_advertiser,
         "grain": grain,
         "start_date": start_date_iso,
         "end_date": end_date_iso,
         "active_advertisers": int(advertiser_df["advertiser_id"].nunique()) if not advertiser_df.empty else 0,
+        "advertisers_in_scope": int(advertiser_table_df["advertiser_id"].nunique()) if not advertiser_table_df.empty and "advertiser_id" in advertiser_table_df.columns else 0,
         "orders_in_scope": int(order_table_df["order_id"].nunique()) if not order_table_df.empty and "order_id" in order_table_df.columns else 0,
         "campaigns_in_scope": int(campaign_table_df["campaign_id"].nunique()) if not campaign_table_df.empty and "campaign_id" in campaign_table_df.columns else 0,
         "daily_rows_in_scope": int(len(daily_df)),
@@ -90,6 +88,16 @@ def build_assistant_context(
         "total_clicks_interval": int(pd.to_numeric(daily_df.get("clicks", 0), errors="coerce").fillna(0).sum()) if not daily_df.empty else 0,
     }
 
+    advertiser_columns = [
+        "advertiser_id",
+        "advertiser_name",
+        "active_campaign_count",
+        "objective_effective_value",
+        "impressions",
+        "official_start_date",
+        "official_end_date",
+        "alert_label",
+    ]
     order_columns = [
         "order_id",
         "order_name",
@@ -139,6 +147,12 @@ def build_assistant_context(
 
     return {
         "summary": summary,
+        "available_entities": {
+            "advertiser_names": sorted([str(item) for item in advertiser_df.get("advertiser_name", pd.Series(dtype="object")).dropna().astype(str).unique().tolist()])[:200],
+            "order_names": sorted([str(item) for item in order_table_df.get("order_name", pd.Series(dtype="object")).dropna().astype(str).unique().tolist()])[:300],
+            "campaign_names": sorted([str(item) for item in campaign_table_df.get("campaign_name", pd.Series(dtype="object")).dropna().astype(str).unique().tolist()])[:400],
+        },
+        "advertisers": _compact_records(advertiser_table_df, advertiser_columns, 150),
         "orders": _compact_records(order_table_df, order_columns, 120),
         "campaigns": _compact_records(campaign_table_df, campaign_columns, 200),
         "creatives": _compact_records(creative_df, creative_columns, 250),

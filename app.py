@@ -571,10 +571,8 @@ def render_ai_assistant_page(advertiser_df: pd.DataFrame, order_df: pd.DataFrame
 
     start_floor = pd.Timestamp.now().date() - timedelta(days=120)
     max_day = pd.Timestamp.now().date()
-    top1, top2, top3 = st.columns([1.1, 1.1, 1.2])
+    top1, top2 = st.columns([1.1, 1.2])
     with top1:
-        scope = st.radio("Scope", options=["Global", "Annonceur"], horizontal=True, key="ai_scope")
-    with top2:
         grain = st.radio(
             "Grain",
             options=["day", "week", "month"],
@@ -583,7 +581,7 @@ def render_ai_assistant_page(advertiser_df: pd.DataFrame, order_df: pd.DataFrame
             key="ai_grain",
             format_func=lambda value: {"day": "Jour", "week": "Semaine", "month": "Mois"}[value],
         )
-    with top3:
+    with top2:
         interval = st.date_input(
             "Intervalle",
             value=(max(start_floor, max_day - timedelta(days=90)), max_day),
@@ -592,56 +590,34 @@ def render_ai_assistant_page(advertiser_df: pd.DataFrame, order_df: pd.DataFrame
             key="ai_interval",
         )
     start_date, end_date = interval if isinstance(interval, tuple) else (start_floor, max_day)
-    selected_name = ""
-    if scope == "Annonceur":
-        advertiser_options = advertiser_df[advertiser_df["is_active"]]["advertiser_name"].tolist()
-        if not advertiser_options:
-            st.info("Aucun annonceur actif disponible.")
-            return
-        selected_name = st.selectbox("Annonceur cible", advertiser_options, key="ai_advertiser")
+    daily = build_daily_frame(fetch_gam_daily_report(start_date.isoformat(), end_date.isoformat()))
+    active_advertiser_df = advertiser_df[advertiser_df["is_active"]].copy()
+    active_order_df = order_df[order_df["is_active"]].copy()
+    active_campaign_df = campaign_df[campaign_df["is_active"]].copy()
+    order_table_df, _, _ = build_admin_table(daily, active_order_df, grain)
 
-    daily = build_daily_frame(fetch_gam_daily_report(start_date.isoformat(), end_date.isoformat(), advertiser_name=selected_name))
-    if scope == "Annonceur" and selected_name:
-        scoped_advertiser_df = advertiser_df[advertiser_df["advertiser_name"] == selected_name].copy()
-        if scoped_advertiser_df.empty:
-            st.info("Annonceur introuvable dans le scope actif.")
-            return
-        advertiser_row = scoped_advertiser_df.iloc[0]
-        advertiser_id = str(advertiser_row["advertiser_id"])
-        scoped_daily = daily[daily["advertiser_id"].astype(str) == advertiser_id].copy()
-        scoped_campaigns = campaign_df[campaign_df["advertiser_id"].astype(str) == advertiser_id].copy()
-        campaign_table_df, _, _ = build_campaign_table(scoped_daily, scoped_campaigns, advertiser_id, grain)
-        order_table_df = order_df[order_df["advertiser_id"].astype(str) == advertiser_id].copy()
-        creative_df = fetch_gam_creative_assignments(tuple(scoped_campaigns["campaign_id"].astype(str).tolist()))
-        context = build_assistant_context(
-            page_scope=scope,
-            selected_advertiser=selected_name,
-            grain=grain,
-            start_date_iso=start_date.isoformat(),
-            end_date_iso=end_date.isoformat(),
-            advertiser_df=scoped_advertiser_df,
-            order_table_df=order_table_df,
-            campaign_table_df=campaign_table_df,
-            creative_df=creative_df,
-            daily_df=scoped_daily,
-        )
-    else:
-        scoped_orders = order_df[order_df["is_active"]].copy()
-        order_table_df, _, _ = build_admin_table(daily, scoped_orders, grain)
-        campaign_table_df = campaign_df[campaign_df["is_active"]].copy()
-        creative_df = pd.DataFrame(columns=["campaign_id", "creative_id", "creative_name", "creative_start_date", "creative_end_date"])
-        context = build_assistant_context(
-            page_scope=scope,
-            selected_advertiser="",
-            grain=grain,
-            start_date_iso=start_date.isoformat(),
-            end_date_iso=end_date.isoformat(),
-            advertiser_df=advertiser_df[advertiser_df["is_active"]].copy(),
-            order_table_df=order_table_df,
-            campaign_table_df=campaign_table_df,
-            creative_df=creative_df,
-            daily_df=daily,
-        )
+    campaign_tables: list[pd.DataFrame] = []
+    for advertiser_id in active_campaign_df["advertiser_id"].astype(str).dropna().unique().tolist():
+        scoped_daily = daily[daily["advertiser_id"].astype(str) == str(advertiser_id)].copy()
+        scoped_campaigns = active_campaign_df[active_campaign_df["advertiser_id"].astype(str) == str(advertiser_id)].copy()
+        if scoped_campaigns.empty:
+            continue
+        table_df, _, _ = build_campaign_table(scoped_daily, scoped_campaigns, str(advertiser_id), grain)
+        if not table_df.empty:
+            campaign_tables.append(table_df)
+    campaign_table_df = pd.concat(campaign_tables, ignore_index=True) if campaign_tables else active_campaign_df.head(0).copy()
+    creative_df = fetch_gam_creative_assignments(tuple(active_campaign_df["campaign_id"].astype(str).tolist()))
+    context = build_assistant_context(
+        grain=grain,
+        start_date_iso=start_date.isoformat(),
+        end_date_iso=end_date.isoformat(),
+        advertiser_df=active_advertiser_df,
+        advertiser_table_df=active_advertiser_df,
+        order_table_df=order_table_df,
+        campaign_table_df=campaign_table_df,
+        creative_df=creative_df,
+        daily_df=daily,
+    )
 
     if "ai_chat_history" not in st.session_state:
         st.session_state["ai_chat_history"] = []
@@ -652,7 +628,7 @@ def render_ai_assistant_page(advertiser_df: pd.DataFrame, order_df: pd.DataFrame
             st.session_state["ai_chat_history"] = []
             st.rerun()
     with action_col2:
-        st.caption("L'assistant repond uniquement avec les donnees chargees dans cette page.")
+        st.caption("L'assistant voit en meme temps les annonceurs, ordres, campagnes, creations et donnees journalieres de l'intervalle.")
 
     for message in st.session_state["ai_chat_history"]:
         with st.chat_message("user"):
