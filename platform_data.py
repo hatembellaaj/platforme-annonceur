@@ -11,7 +11,7 @@ import pandas as pd
 import psycopg
 import streamlit as st
 
-from gam_api import get_company_order_campaign_bundle, run_direct_report  # noqa: E402
+from gam_api import fetch_creative_assignments, get_company_order_campaign_bundle, run_direct_report  # noqa: E402
 from local_supabase import get_supabase_conninfo  # noqa: E402
 
 APP_DIR = Path(__file__).resolve().parent
@@ -20,18 +20,9 @@ ORDER_OVERRIDES_FILE = APP_DIR / "order_overrides.json"
 CAMPAIGN_OVERRIDES_FILE = APP_DIR / "campaign_overrides.json"
 OVERRIDES_TABLE = "platform_annonceur_overrides"
 
-ACTIVE_STATUSES = {"DELIVERING", "ACTIVE", "READY", "STARTED", "APPROVED"}
-INACTIVE_STATUSES = {
-    "COMPLETED",
-    "PAUSED",
-    "PAUSED_INVENTORY_RELEASED",
-    "INACTIVE",
-    "CANCELED",
-    "DISAPPROVED",
-    "DRAFT",
-    "PENDING_APPROVAL",
-    "ON_HOLD",
-}
+INCLUDED_SOURCE_STATUSES = {"DELIVERING", "READY", "COMPLETED"}
+OBJECTIVE_SOURCE_STATUSES = {"DELIVERING"}
+LIVE_SOURCE_STATUSES = {"DELIVERING", "READY"}
 MONTH_LABELS_FR = {
     1: "janv.",
     2: "fevr.",
@@ -360,7 +351,7 @@ def fetch_gam_campaign_snapshot() -> pd.DataFrame:
         "clicks_delivered",
     ]:
         campaigns[column] = pd.to_numeric(campaigns.get(column, 0), errors="coerce").fillna(0)
-    return campaigns
+    return campaigns[campaigns["status"].isin(INCLUDED_SOURCE_STATUSES)].copy()
 
 
 @st.cache_data(ttl=1800, show_spinner="Chargement des ordres GAM...")
@@ -434,6 +425,7 @@ def fetch_gam_daily_report(start_date_iso: str, end_date_iso: str, advertiser_na
     frame["impressions"] = pd.to_numeric(frame.get("ad_server_impressions", 0), errors="coerce").fillna(0).astype(int)
     frame["clicks"] = pd.to_numeric(frame.get("ad_server_clicks", 0), errors="coerce").fillna(0).astype(int)
     frame["ctr"] = pd.to_numeric(frame.get("ad_server_ctr", 0), errors="coerce").fillna(0.0)
+    frame = frame[frame["source_status"].isin(INCLUDED_SOURCE_STATUSES)].copy()
     return frame[
         [
             "date",
@@ -458,9 +450,7 @@ def infer_is_active(source_status: str, start_value: Any, end_value: Any, is_arc
     today = pd.Timestamp.now().date()
     start_day = parse_iso_date(start_value)
     end_day = parse_iso_date(end_value)
-    if status in INACTIVE_STATUSES:
-        return False
-    if status and status not in ACTIVE_STATUSES:
+    if status not in LIVE_SOURCE_STATUSES:
         return False
     if start_day and start_day > today:
         return False
@@ -489,8 +479,9 @@ def build_campaign_records(frame: pd.DataFrame, campaign_overrides: dict[str, di
     if frame.empty:
         return pd.DataFrame([asdict(record) for record in []])
 
+    filtered_frame = frame[frame["status"].astype(str).str.upper().isin(INCLUDED_SOURCE_STATUSES)].copy()
     records: list[CampaignRecord] = []
-    for _, row in frame.iterrows():
+    for _, row in filtered_frame.iterrows():
         campaign_id = str(row.get("campaign_id", ""))
         override = campaign_overrides.get(campaign_id, {})
         objective_override = override.get("objective_override_value")
@@ -557,7 +548,10 @@ def build_order_records(order_df: pd.DataFrame, campaign_df: pd.DataFrame, order
         order_slice = campaign_df[campaign_df["order_id"].astype(str) == order_id].copy()
         override = order_overrides.get(order_id, {})
         non_archived_slice = order_slice[~order_slice["is_archived_source"].astype(bool)].copy() if not order_slice.empty else order_slice
-        objective_source_base = non_archived_slice if not non_archived_slice.empty else order_slice
+        delivering_slice = non_archived_slice[
+            non_archived_slice["source_status"].astype(str).str.upper().isin(OBJECTIVE_SOURCE_STATUSES)
+        ].copy() if not non_archived_slice.empty else non_archived_slice
+        objective_source_base = delivering_slice
         objective_source = round(safe_float(objective_source_base["objective_source_value"].sum()), 2) if not objective_source_base.empty else 0.0
         objective_override = override.get("objective_override_value")
         objective_effective = objective_override if objective_override not in (None, "") else objective_source
@@ -913,3 +907,18 @@ def build_campaign_table(filtered_daily: pd.DataFrame, campaign_df: pd.DataFrame
     )
     table = table.sort_values(["P", "campaign_name"], ascending=[False, True]).reset_index(drop=True)
     return table, period_labels, get_grain_labels(grain)
+
+
+@st.cache_data(ttl=1800, show_spinner="Chargement des creations GAM...")
+def fetch_gam_creative_assignments(campaign_ids: tuple[str, ...]) -> pd.DataFrame:
+    line_item_ids = [int(item) for item in campaign_ids if str(item).strip().isdigit()]
+    frame = fetch_creative_assignments(line_item_ids)
+    if frame.empty:
+        return pd.DataFrame(columns=["campaign_id", "creative_id", "creative_name", "creative_start_date", "creative_end_date"])
+    frame["campaign_id"] = frame["campaign_id"].fillna("").astype(str)
+    frame["creative_id"] = frame["creative_id"].fillna("").astype(str)
+    frame["creative_name"] = frame["creative_name"].fillna("").astype(str).str.strip()
+    frame["creative_start_date"] = frame["creative_start_date"].apply(format_iso_date)
+    frame["creative_end_date"] = frame["creative_end_date"].apply(format_iso_date)
+    frame = frame.sort_values(["campaign_id", "creative_name", "creative_id"], ascending=[True, True, True]).reset_index(drop=True)
+    return frame

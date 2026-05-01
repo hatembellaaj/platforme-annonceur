@@ -80,7 +80,10 @@ def _fetch_all_by_statement(service, method_name: str, query: str, page_size: in
     while True:
         statement = {"query": f"{query} LIMIT {page_size} OFFSET {offset}"}
         response = getattr(service, method_name)(statement)
-        batch = getattr(response, "results", None) or response.get("results", []) or []
+        batch = getattr(response, "results", None)
+        if batch is None and isinstance(response, dict):
+            batch = response.get("results", [])
+        batch = batch or []
         if not batch:
             break
         rows.extend(batch)
@@ -313,3 +316,61 @@ def run_direct_report(
     if limit_rows and len(frame) > int(limit_rows):
         frame = frame.head(int(limit_rows)).copy()
     return {"report_job_id": report_job_id, "status": status, "rows": frame.to_dict(orient="records")}
+
+
+def fetch_creative_assignments(line_item_ids: list[int]) -> pd.DataFrame:
+    if not line_item_ids:
+        return pd.DataFrame(columns=["campaign_id", "creative_id", "creative_name", "creative_start_date", "creative_end_date"])
+
+    client = get_gam_client()
+    api_version = _api_version()
+    lica_service = client.GetService("LineItemCreativeAssociationService", version=api_version)
+    creative_service = client.GetService("CreativeService", version=api_version)
+
+    creative_rows: list[dict[str, Any]] = []
+    creative_ids: set[int] = set()
+    assignment_rows: list[dict[str, Any]] = []
+
+    unique_line_item_ids = sorted({int(item) for item in line_item_ids if str(item).strip()})
+    for index in range(0, len(unique_line_item_ids), 50):
+        chunk = unique_line_item_ids[index : index + 50]
+        ids_text = ", ".join(str(item) for item in chunk)
+        licas = _fetch_all_by_statement(
+            lica_service,
+            "getLineItemCreativeAssociationsByStatement",
+            f"WHERE lineItemId IN ({ids_text}) ORDER BY lineItemId, creativeId",
+        )
+        for lica in licas:
+            creative_id = _safe_int(getattr(lica, "creativeId", None)) or 0
+            creative_ids.add(creative_id)
+            assignment_rows.append(
+                {
+                    "campaign_id": str(_safe_int(getattr(lica, "lineItemId", None)) or ""),
+                    "creative_id": str(creative_id),
+                    "creative_start_date": _normalize_dt(getattr(lica, "startDateTime", None)),
+                    "creative_end_date": _normalize_dt(getattr(lica, "endDateTime", None)),
+                }
+            )
+
+    creative_name_map: dict[str, str] = {}
+    unique_creative_ids = sorted(creative_ids)
+    for index in range(0, len(unique_creative_ids), 50):
+        chunk = unique_creative_ids[index : index + 50]
+        ids_text = ", ".join(str(item) for item in chunk)
+        creatives = _fetch_all_by_statement(
+            creative_service,
+            "getCreativesByStatement",
+            f"WHERE id IN ({ids_text}) ORDER BY id",
+        )
+        for creative in creatives:
+            creative_name_map[str(_safe_int(getattr(creative, "id", None)) or "")] = str(getattr(creative, "name", "") or "")
+
+    for row in assignment_rows:
+        creative_rows.append(
+            {
+                **row,
+                "creative_name": creative_name_map.get(row["creative_id"], ""),
+            }
+        )
+
+    return pd.DataFrame(creative_rows)

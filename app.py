@@ -20,6 +20,7 @@ from platform_data import (  # noqa: E402
     build_campaign_table,
     build_order_records,
     build_daily_frame,
+    fetch_gam_creative_assignments,
     fetch_gam_campaign_snapshot,
     fetch_gam_order_snapshot,
     fetch_gam_daily_report,
@@ -484,6 +485,31 @@ def render_advertiser_page(advertiser_df: pd.DataFrame, campaign_df: pd.DataFram
     )
     if update_campaign_overrides(advertiser_campaign_save_df):
         st.rerun()
+
+    st.markdown('<div class="section-title">Creations par campagne</div>', unsafe_allow_html=True)
+    creative_df = fetch_gam_creative_assignments(tuple(advertiser_campaigns["campaign_id"].astype(str).tolist()))
+    campaign_lookup = campaign_table_df.set_index("campaign_id").to_dict("index") if not campaign_table_df.empty else {}
+    for campaign_row in campaign_table_df[["campaign_id", "campaign_name", "start_date", "end_date"]].to_dict("records"):
+        campaign_id = str(campaign_row["campaign_id"])
+        creatives_slice = creative_df[creative_df["campaign_id"].astype(str) == campaign_id].copy() if not creative_df.empty else pd.DataFrame()
+        expander_label = f'{campaign_row["campaign_name"]} ({len(creatives_slice)})'
+        with st.expander(expander_label, expanded=False):
+            if creatives_slice.empty:
+                st.caption("Aucune creation liee a cette campagne.")
+                continue
+            base_start = campaign_row.get("start_date") or campaign_lookup.get(campaign_id, {}).get("start_date")
+            base_end = campaign_row.get("end_date") or campaign_lookup.get(campaign_id, {}).get("end_date")
+            creatives_display = creatives_slice[["creative_name", "creative_start_date", "creative_end_date"]].copy()
+            creatives_display["creative_start_date"] = creatives_display["creative_start_date"].fillna("").replace("", base_start or "-")
+            creatives_display["creative_end_date"] = creatives_display["creative_end_date"].fillna("").replace("", base_end or "-")
+            creatives_display = creatives_display.rename(
+                columns={
+                    "creative_name": "Creation",
+                    "creative_start_date": "Debut",
+                    "creative_end_date": "Fin",
+                }
+            )
+            st.dataframe(creatives_display, width="stretch", hide_index=True)
 
 
 def main() -> None:
