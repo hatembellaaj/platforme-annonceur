@@ -20,7 +20,7 @@ ORDER_OVERRIDES_FILE = APP_DIR / "order_overrides.json"
 CAMPAIGN_OVERRIDES_FILE = APP_DIR / "campaign_overrides.json"
 OVERRIDES_TABLE = "platform_annonceur_overrides"
 
-INCLUDED_SOURCE_STATUSES = {"DELIVERING", "READY", "COMPLETED"}
+INCLUDED_SOURCE_STATUSES = {"DELIVERING", "READY"}
 OBJECTIVE_SOURCE_STATUSES = {"DELIVERING"}
 LIVE_SOURCE_STATUSES = {"DELIVERING", "READY"}
 MONTH_LABELS_FR = {
@@ -421,7 +421,15 @@ def fetch_gam_daily_report(start_date_iso: str, end_date_iso: str, advertiser_na
     frame["order_name"] = text_series("order_name")
     frame["campaign_id"] = text_series("line_item_id")
     frame["campaign_name"] = text_series("line_item_name")
-    frame["source_status"] = text_series("line_item_status").str.upper()
+    snapshot_status_map = (
+        fetch_gam_campaign_snapshot()[["campaign_id", "status"]]
+        .drop_duplicates(subset=["campaign_id"])
+        .assign(campaign_id=lambda data: data["campaign_id"].astype(str), status=lambda data: data["status"].astype(str).str.upper())
+        .set_index("campaign_id")["status"]
+        .to_dict()
+    )
+    report_status = text_series("line_item_status").str.upper()
+    frame["source_status"] = frame["campaign_id"].map(snapshot_status_map).fillna(report_status).astype(str).str.upper()
     frame["impressions"] = pd.to_numeric(frame.get("ad_server_impressions", 0), errors="coerce").fillna(0).astype(int)
     frame["clicks"] = pd.to_numeric(frame.get("ad_server_clicks", 0), errors="coerce").fillna(0).astype(int)
     frame["ctr"] = pd.to_numeric(frame.get("ad_server_ctr", 0), errors="coerce").fillna(0.0)
@@ -781,27 +789,43 @@ def compute_table_alert(is_active: bool, moyenne: float, ecart_periode: float) -
     return "Dans l'objectif"
 
 
-def _prepare_period_columns(filtered_daily: pd.DataFrame, group_cols: list[str], grain: str) -> tuple[pd.DataFrame, list[str], int]:
+def _prepare_period_columns(filtered_daily: pd.DataFrame, group_cols: list[str], grain: str) -> tuple[pd.DataFrame, list[str], list[dict[str, Any]]]:
     if filtered_daily.empty:
-        return pd.DataFrame(columns=group_cols), [], 0
+        return pd.DataFrame(columns=group_cols), [], []
     working = filtered_daily.copy()
     working["period_key"] = _get_period_key(pd.to_datetime(working["date"]), grain)
     grouped = working.groupby(group_cols + ["period_key"], as_index=False)["impressions"].sum()
     periods = sorted(grouped["period_key"].unique())
     labels = [_format_period_label(period_value, grain) for period_value in periods]
+    period_specs = [
+        {
+            "label": _format_period_label(period_value, grain),
+            "start": period_value.start_time.date(),
+            "end": period_value.end_time.date(),
+        }
+        for period_value in periods
+    ]
     grouped["period_label"] = grouped["period_key"].apply(lambda item: _format_period_label(item, grain))
     pivot = grouped.pivot(index=group_cols, columns="period_label", values="impressions").reset_index()
     pivot = pivot.fillna(0)
     for label in labels:
         if label not in pivot.columns:
             pivot[label] = 0
-    return pivot, labels, len(labels)
+    return pivot, labels, period_specs
+
+
+def _period_intersects_row(period_start: date, period_end: date, row_start: date | None, row_end: date | None) -> bool:
+    if row_start and period_end < row_start:
+        return False
+    if row_end and period_start > row_end:
+        return False
+    return True
 
 
 def _attach_period_metrics(
     table: pd.DataFrame,
     period_labels: list[str],
-    visible_period_count: int,
+    period_specs: list[dict[str, Any]],
     grain: str,
     start_col: str,
     end_col: str,
@@ -821,8 +845,41 @@ def _attach_period_metrics(
         else 0.0,
         axis=1,
     )
-    table["P"] = table[period_labels].sum(axis=1) if period_labels else 0
-    table["Q"] = table["P"] / visible_period_count if visible_period_count > 0 else 0
+    display_rows: list[dict[str, Any]] = []
+    sum_values: list[int] = []
+    visible_counts: list[int] = []
+    spec_by_label = {str(item["label"]): item for item in period_specs}
+    for _, row in table.iterrows():
+        row_start = parse_iso_date(row.get(start_col))
+        row_end = parse_iso_date(row.get(end_col))
+        row_display: dict[str, Any] = {}
+        row_sum = 0
+        row_visible_count = 0
+        for label in period_labels:
+            raw_value = safe_int(row.get(label))
+            spec = spec_by_label.get(label, {})
+            period_start = spec.get("start")
+            period_end = spec.get("end")
+            in_scope = True
+            if period_start and period_end:
+                in_scope = _period_intersects_row(period_start, period_end, row_start, row_end)
+            if in_scope:
+                row_display[label] = raw_value
+                row_sum += raw_value
+                row_visible_count += 1
+            else:
+                row_display[label] = "-"
+        display_rows.append(row_display)
+        sum_values.append(row_sum)
+        visible_counts.append(row_visible_count)
+    for label in period_labels:
+        table[label] = [row_display[label] for row_display in display_rows]
+    table["visible_period_count"] = visible_counts
+    table["P"] = sum_values
+    table["Q"] = table.apply(
+        lambda item: (safe_float(item["P"]) / safe_float(item["visible_period_count"])) if safe_float(item["visible_period_count"]) > 0 else 0.0,
+        axis=1,
+    )
     table["R"] = table["Q"] - table["obj_period"]
     table["S"] = table.apply(
         lambda item: (safe_float(item["R"]) / safe_float(item["Q"]) * 100) if safe_float(item["Q"]) > 0 else 0.0,
@@ -855,12 +912,12 @@ def build_admin_table(filtered_daily: pd.DataFrame, order_df: pd.DataFrame, grai
         "objective_override_value",
         "objective_effective_value",
     ]
-    pivot, period_labels, visible_period_count = _prepare_period_columns(filtered_daily, ["order_id"], grain)
+    pivot, period_labels, period_specs = _prepare_period_columns(filtered_daily, ["order_id"], grain)
     table = order_df[base_columns].copy().merge(pivot, on="order_id", how="left")
     table = _attach_period_metrics(
         table,
         period_labels,
-        visible_period_count,
+        period_specs,
         grain,
         start_col="official_start_date",
         end_col="official_end_date",
@@ -893,12 +950,12 @@ def build_campaign_table(filtered_daily: pd.DataFrame, campaign_df: pd.DataFrame
         "objective_effective_value",
     ]
     campaign_daily = filtered_daily[filtered_daily["advertiser_id"].astype(str) == str(advertiser_id)].copy()
-    pivot, period_labels, visible_period_count = _prepare_period_columns(campaign_daily, ["campaign_id"], grain)
+    pivot, period_labels, period_specs = _prepare_period_columns(campaign_daily, ["campaign_id"], grain)
     table = campaign_slice[base_columns].merge(pivot, on="campaign_id", how="left")
     table = _attach_period_metrics(
         table,
         period_labels,
-        visible_period_count,
+        period_specs,
         grain,
         start_col="start_date",
         end_col="end_date",

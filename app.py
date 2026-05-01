@@ -300,6 +300,8 @@ def render_admin_page(order_df: pd.DataFrame) -> None:
             "duration_days": "Duree",
         }
     )
+    for column_name in ["Debut", "Fin"]:
+        advertiser_editor[column_name] = advertiser_editor[column_name].fillna("").replace("", "-")
     advertiser_edited = st.data_editor(
         advertiser_editor,
         width="stretch",
@@ -444,6 +446,8 @@ def render_advertiser_page(advertiser_df: pd.DataFrame, campaign_df: pd.DataFram
             "duration_days": "Duree",
         }
     )
+    for column_name in ["Debut", "Fin", "Debut API", "Fin API"]:
+        advertiser_campaign_editor[column_name] = advertiser_campaign_editor[column_name].fillna("").replace("", "-")
     advertiser_campaign_edited = st.data_editor(
         advertiser_campaign_editor,
         width="stretch",
