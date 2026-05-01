@@ -520,6 +520,38 @@ def compute_expected_delivery(objective: Any, start_value: Any, end_value: Any, 
     }
 
 
+def compute_expected_delivery_for_interval(
+    objective: Any,
+    start_value: Any,
+    end_value: Any,
+    interval_start_value: Any,
+    interval_end_value: Any,
+) -> dict[str, float]:
+    objective_value = safe_float(objective)
+    start_day = parse_iso_date(start_value)
+    end_day = parse_iso_date(end_value)
+    interval_start = parse_iso_date(interval_start_value)
+    interval_end = parse_iso_date(interval_end_value)
+    if objective_value <= 0 or not start_day or not end_day or not interval_start or not interval_end:
+        return {"expected_delivery": 0.0, "overlap_days": 0.0, "total_days": 0.0, "overlap_ratio": 0.0}
+    if end_day < start_day or interval_end < interval_start:
+        return {"expected_delivery": 0.0, "overlap_days": 0.0, "total_days": 0.0, "overlap_ratio": 0.0}
+    overlap_start = max(start_day, interval_start)
+    overlap_end = min(end_day, interval_end)
+    total_days = max((end_day - start_day).days + 1, 0)
+    if total_days <= 0 or overlap_end < overlap_start:
+        return {"expected_delivery": 0.0, "overlap_days": 0.0, "total_days": float(total_days), "overlap_ratio": 0.0}
+    overlap_days = max((overlap_end - overlap_start).days + 1, 0)
+    overlap_ratio = overlap_days / total_days if total_days > 0 else 0.0
+    expected_delivery = objective_value * overlap_ratio
+    return {
+        "expected_delivery": round(expected_delivery, 2),
+        "overlap_days": float(overlap_days),
+        "total_days": float(total_days),
+        "overlap_ratio": round(overlap_ratio, 4),
+    }
+
+
 def compute_delivery_alert(is_active: bool, objective: Any, impressions: Any, start_value: Any, end_value: Any) -> str:
     if not is_active:
         return "Inactif"
@@ -529,6 +561,8 @@ def compute_delivery_alert(is_active: bool, objective: Any, impressions: Any, st
     delivered = safe_float(impressions)
     if expected_delivery <= 0:
         return "A verifier"
+    if safe_float(pacing["elapsed_days"]) <= 3:
+        return "Debut de campagne"
     delivery_rate = delivered / expected_delivery if expected_delivery > 0 else 0.0
     if delivered <= 0 and elapsed_ratio >= 0.15:
         return "Critique"
@@ -839,19 +873,62 @@ def compute_table_alert(is_active: bool, objective: Any, impressions: Any, start
     return compute_delivery_alert(is_active, objective, impressions, start_value, end_value)
 
 
+def compute_interval_alert(
+    is_active: bool,
+    objective: Any,
+    interval_impressions: Any,
+    start_value: Any,
+    end_value: Any,
+    interval_start_value: Any,
+    interval_end_value: Any,
+) -> str:
+    if not is_active:
+        return "Inactif"
+    pacing = compute_expected_delivery_for_interval(objective, start_value, end_value, interval_start_value, interval_end_value)
+    expected_delivery = safe_float(pacing["expected_delivery"])
+    delivered = safe_float(interval_impressions)
+    if expected_delivery <= 0:
+        return "A verifier"
+    if safe_float(pacing["overlap_days"]) <= 3:
+        return "Debut de campagne"
+    interval_rate = delivered / expected_delivery
+    if delivered <= 0 and safe_float(pacing["overlap_days"]) >= 2:
+        return "Critique"
+    if interval_rate < 0.70:
+        return "Critique"
+    if interval_rate < 0.90:
+        return "En retard"
+    if interval_rate <= 1.10:
+        return "Dans le rythme"
+    return "En avance"
+
+
 def _prepare_period_columns(filtered_daily: pd.DataFrame, group_cols: list[str], grain: str) -> tuple[pd.DataFrame, list[str], list[dict[str, Any]]]:
     if filtered_daily.empty:
         return pd.DataFrame(columns=group_cols), [], []
     working = filtered_daily.copy()
-    working["period_key"] = _get_period_key(pd.to_datetime(working["date"]), grain)
+    working["date"] = pd.to_datetime(working["date"], errors="coerce")
+    working = working.dropna(subset=["date"]).copy()
+    working["period_key"] = _get_period_key(working["date"], grain)
     grouped = working.groupby(group_cols + ["period_key"], as_index=False)["impressions"].sum()
     periods = sorted(grouped["period_key"].unique())
     labels = [_format_period_label(period_value, grain) for period_value in periods]
+    period_bounds = (
+        working.groupby("period_key", as_index=False)["date"]
+        .agg(period_start="min", period_end="max")
+    )
+    bounds_map = {
+        item["period_key"]: {
+            "start": pd.to_datetime(item["period_start"]).date() if pd.notna(item["period_start"]) else None,
+            "end": pd.to_datetime(item["period_end"]).date() if pd.notna(item["period_end"]) else None,
+        }
+        for _, item in period_bounds.iterrows()
+    }
     period_specs = [
         {
             "label": _format_period_label(period_value, grain),
-            "start": period_value.start_time.date(),
-            "end": period_value.end_time.date(),
+            "start": bounds_map.get(period_value, {}).get("start") or period_value.start_time.date(),
+            "end": bounds_map.get(period_value, {}).get("end") or period_value.end_time.date(),
         }
         for period_value in periods
     ]
@@ -898,6 +975,8 @@ def _attach_period_metrics(
     display_rows: list[dict[str, Any]] = []
     sum_values: list[int] = []
     visible_counts: list[int] = []
+    visible_starts: list[date | None] = []
+    visible_ends: list[date | None] = []
     spec_by_label = {str(item["label"]): item for item in period_specs}
     for _, row in table.iterrows():
         row_start = parse_iso_date(row.get(start_col))
@@ -905,6 +984,8 @@ def _attach_period_metrics(
         row_display: dict[str, Any] = {}
         row_sum = 0
         row_visible_count = 0
+        row_visible_start: date | None = None
+        row_visible_end: date | None = None
         for label in period_labels:
             raw_value = safe_int(row.get(label))
             spec = spec_by_label.get(label, {})
@@ -917,14 +998,22 @@ def _attach_period_metrics(
                 row_display[label] = raw_value
                 row_sum += raw_value
                 row_visible_count += 1
+                if period_start and (row_visible_start is None or period_start < row_visible_start):
+                    row_visible_start = period_start
+                if period_end and (row_visible_end is None or period_end > row_visible_end):
+                    row_visible_end = period_end
             else:
                 row_display[label] = "-"
         display_rows.append(row_display)
         sum_values.append(row_sum)
         visible_counts.append(row_visible_count)
+        visible_starts.append(row_visible_start)
+        visible_ends.append(row_visible_end)
     for label in period_labels:
         table[label] = [row_display[label] for row_display in display_rows]
     table["visible_period_count"] = visible_counts
+    table["visible_interval_start"] = visible_starts
+    table["visible_interval_end"] = visible_ends
     table["P"] = sum_values
     table["Q"] = table.apply(
         lambda item: (safe_float(item["P"]) / safe_float(item["visible_period_count"])) if safe_float(item["visible_period_count"]) > 0 else 0.0,
@@ -940,12 +1029,14 @@ def _attach_period_metrics(
         axis=1,
     )
     table["alert_label"] = table.apply(
-        lambda item: compute_table_alert(
+        lambda item: compute_interval_alert(
             str(item.get(status_col)) == "Active",
             item.get(objective_col),
-            item.get("impressions"),
+            item.get("P"),
             item.get(start_col),
             item.get(end_col),
+            item.get("visible_interval_start"),
+            item.get("visible_interval_end"),
         ),
         axis=1,
     )
