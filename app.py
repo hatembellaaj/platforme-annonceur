@@ -571,25 +571,13 @@ def render_ai_assistant_page(advertiser_df: pd.DataFrame, order_df: pd.DataFrame
 
     start_floor = pd.Timestamp.now().date() - timedelta(days=120)
     max_day = pd.Timestamp.now().date()
-    top1, top2 = st.columns([1.1, 1.2])
-    with top1:
-        grain = st.radio(
-            "Grain",
-            options=["day", "week", "month"],
-            index=2,
-            horizontal=True,
-            key="ai_grain",
-            format_func=lambda value: {"day": "Jour", "week": "Semaine", "month": "Mois"}[value],
-        )
-    with top2:
-        interval = st.date_input(
-            "Intervalle",
-            value=(max(start_floor, max_day - timedelta(days=90)), max_day),
-            min_value=start_floor,
-            max_value=max_day,
-            key="ai_interval",
-        )
-    start_date, end_date = interval if isinstance(interval, tuple) else (start_floor, max_day)
+    grain = "month"
+    start_date = max(start_floor, max_day - timedelta(days=90))
+    end_date = max_day
+    st.caption(
+        f"L'assistant recoit automatiquement les donnees chargees du {start_date.isoformat()} au {end_date.isoformat()} "
+        "et choisit lui-meme le scope et le niveau de lecture selon la question."
+    )
     daily = build_daily_frame(fetch_gam_daily_report(start_date.isoformat(), end_date.isoformat()))
     active_advertiser_df = advertiser_df[advertiser_df["is_active"]].copy()
     active_order_df = order_df[order_df["is_active"]].copy()

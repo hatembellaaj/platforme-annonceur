@@ -76,7 +76,7 @@ def build_assistant_context(
     daily_df: pd.DataFrame,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {
-        "grain": grain,
+        "default_table_grain": grain,
         "start_date": start_date_iso,
         "end_date": end_date_iso,
         "active_advertisers": int(advertiser_df["advertiser_id"].nunique()) if not advertiser_df.empty else 0,
