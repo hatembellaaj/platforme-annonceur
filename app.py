@@ -346,13 +346,12 @@ def render_admin_page(order_df: pd.DataFrame) -> None:
 
 def render_advertiser_page(advertiser_df: pd.DataFrame, campaign_df: pd.DataFrame) -> None:
     st.markdown('<div class="section-title">Page Annonceur</div>', unsafe_allow_html=True)
-    active_advertisers = advertiser_df[advertiser_df["is_active"]].copy()
-    advertiser_options = active_advertisers["advertiser_name"].tolist()
+    advertiser_options = advertiser_df["advertiser_name"].tolist()
     if not advertiser_options:
-        st.info("Aucun annonceur actif disponible.")
+        st.info("Aucun annonceur disponible.")
         return
     selected_name = st.selectbox("Annonceur", advertiser_options)
-    advertiser_row = active_advertisers[active_advertisers["advertiser_name"] == selected_name].iloc[0]
+    advertiser_row = advertiser_df[advertiser_df["advertiser_name"] == selected_name].iloc[0]
     advertiser_id = str(advertiser_row["advertiser_id"])
     advertiser_campaigns = campaign_df[campaign_df["advertiser_id"].astype(str) == advertiser_id].copy()
     start_floor = pd.Timestamp.now().date() - timedelta(days=120)
@@ -579,28 +578,25 @@ def render_ai_assistant_page(advertiser_df: pd.DataFrame, order_df: pd.DataFrame
         "et choisit lui-meme le scope et le niveau de lecture selon la question."
     )
     daily = build_daily_frame(fetch_gam_daily_report(start_date.isoformat(), end_date.isoformat()))
-    active_advertiser_df = advertiser_df[advertiser_df["is_active"]].copy()
-    active_order_df = order_df[order_df["is_active"]].copy()
-    active_campaign_df = campaign_df[campaign_df["is_active"]].copy()
-    order_table_df, _, _ = build_admin_table(daily, active_order_df, grain)
+    order_table_df, _, _ = build_admin_table(daily, order_df, grain)
 
     campaign_tables: list[pd.DataFrame] = []
-    for advertiser_id in active_campaign_df["advertiser_id"].astype(str).dropna().unique().tolist():
+    for advertiser_id in campaign_df["advertiser_id"].astype(str).dropna().unique().tolist():
         scoped_daily = daily[daily["advertiser_id"].astype(str) == str(advertiser_id)].copy()
-        scoped_campaigns = active_campaign_df[active_campaign_df["advertiser_id"].astype(str) == str(advertiser_id)].copy()
+        scoped_campaigns = campaign_df[campaign_df["advertiser_id"].astype(str) == str(advertiser_id)].copy()
         if scoped_campaigns.empty:
             continue
         table_df, _, _ = build_campaign_table(scoped_daily, scoped_campaigns, str(advertiser_id), grain)
         if not table_df.empty:
             campaign_tables.append(table_df)
-    campaign_table_df = pd.concat(campaign_tables, ignore_index=True) if campaign_tables else active_campaign_df.head(0).copy()
-    creative_df = fetch_gam_creative_assignments(tuple(active_campaign_df["campaign_id"].astype(str).tolist()))
+    campaign_table_df = pd.concat(campaign_tables, ignore_index=True) if campaign_tables else campaign_df.head(0).copy()
+    creative_df = fetch_gam_creative_assignments(tuple(campaign_df["campaign_id"].astype(str).tolist()))
     context = build_assistant_context(
         grain=grain,
         start_date_iso=start_date.isoformat(),
         end_date_iso=end_date.isoformat(),
-        advertiser_df=active_advertiser_df,
-        advertiser_table_df=active_advertiser_df,
+        advertiser_df=advertiser_df,
+        advertiser_table_df=advertiser_df,
         order_table_df=order_table_df,
         campaign_table_df=campaign_table_df,
         creative_df=creative_df,
@@ -647,6 +643,10 @@ def main() -> None:
     inject_styles()
     ensure_state()
 
+    if st.sidebar.button("Recharger les donnees API", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+
     st.markdown(
         """
         <div class="hero">
@@ -667,11 +667,12 @@ def main() -> None:
         st.warning("Aucune donnee GAM n'a ete retournee pour la plateforme.")
         return
 
-    active_advertisers = advertiser_df[advertiser_df["is_active"]].copy()
-    active_orders = order_df[order_df["is_active"]].copy()
+    included_advertisers = advertiser_df.copy()
+    included_orders = order_df.copy()
 
     page = st.sidebar.radio("Surface", options=["Admin", "Annonceur", "Assistant IA"])
-    st.sidebar.caption(f"Annonceurs actifs : {len(active_advertisers)}")
+    st.sidebar.caption(f"Annonceurs inclus : {len(included_advertisers)}")
+    st.sidebar.caption(f"Annonceurs actifs : {len(advertiser_df[advertiser_df['is_active']])}")
     st.sidebar.caption(f"Campagnes : {len(campaign_df)}")
     storage_mode = get_override_storage_mode()
     st.sidebar.caption(f"Stockage corrections : {'Supabase' if storage_mode == 'supabase' else 'Local'}")
@@ -679,11 +680,11 @@ def main() -> None:
         st.sidebar.warning("Supabase n'est pas configure. Le stockage local peut ne pas persister sur Streamlit Cloud.")
 
     if page == "Admin":
-        render_admin_page(active_orders)
+        render_admin_page(included_orders)
     elif page == "Annonceur":
-        render_advertiser_page(active_advertisers, campaign_df)
+        render_advertiser_page(included_advertisers, campaign_df)
     else:
-        render_ai_assistant_page(active_advertisers, active_orders, campaign_df)
+        render_ai_assistant_page(included_advertisers, included_orders, campaign_df)
 
 
 if __name__ == "__main__":
