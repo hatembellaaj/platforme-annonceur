@@ -70,13 +70,12 @@ L'application ne garde que les campagnes GAM avec l'un de ces statuts:
 - `DELIVERING`
 - `READY`
 - `PAUSED`
-- `PAUSED_INVENTORY_RELEASED`
 
-Les campagnes `COMPLETED`, archivees, ou autres statuts exclus ne doivent pas etre comptees dans l'analyse.
+Les campagnes `PAUSED_INVENTORY_RELEASED`, `COMPLETED`, archivees, ou autres statuts exclus ne doivent pas etre comptees dans l'analyse.
 
 ### Objectif
 
-- L'objectif affiche au niveau ordre / annonceur est somme a partir des campagnes incluses: `DELIVERING`, `READY`, `PAUSED`, `PAUSED_INVENTORY_RELEASED`.
+- L'objectif affiche au niveau ordre / annonceur est somme a partir des campagnes incluses: `DELIVERING`, `READY`, `PAUSED`.
 - Si une correction manuelle existe, la valeur effective devient la valeur de reference.
 
 ### Impressions
