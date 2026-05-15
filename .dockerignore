@@ -1,0 +1,36 @@
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+env
+
+# Secrets / local-only files (never bake into the image)
+.streamlit/secrets.toml
+gam-service-account.json
+
+# IDE / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docs / heavy assets that don't need to ship in the image
+*.pdf
+DOCKER.md

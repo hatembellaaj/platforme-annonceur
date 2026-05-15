@@ -1,0 +1,67 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: platform-annonceur:latest
+    container_name: platform-annonceur-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Point the Supabase client at the local Postgres service.
+      # These take precedence over anything else if .env doesn't override them.
+      SUPABASE_DB_HOST: postgres
+      SUPABASE_DB_PORT: "5432"
+      SUPABASE_DB_USER: ${POSTGRES_USER:-postgres}
+      SUPABASE_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      SUPABASE_DB_NAME: ${POSTGRES_DB:-platform_annonceur}
+      SUPABASE_DB_SSLMODE: disable
+    ports:
+      - "8087:8501"
+    volumes:
+      # Persist JSON fallback files (used if Supabase ever becomes unreachable)
+      - app_data:/app/data
+      - ./order_overrides.json:/app/order_overrides.json
+      - ./campaign_overrides.json:/app/campaign_overrides.json
+      - ./advertiser_overrides.json:/app/advertiser_overrides.json
+      - ./platform_settings.json:/app/platform_settings.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: platform-annonceur-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-platform_annonceur}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-platform_annonceur}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  adminer:
+    image: adminer:latest
+    container_name: platform-annonceur-adminer
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: pepa-linha
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  app_data:

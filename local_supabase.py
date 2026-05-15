@@ -49,4 +49,5 @@ def get_supabase_conninfo() -> str:
         password = _get_supabase_password()
     if not host or not password:
         raise RuntimeError("Supabase database configuration incomplete.")
-    return f"host={host} port={port} dbname={dbname} user={user} password={password} sslmode=require"
+    sslmode = _get_setting("SUPABASE_DB_SSLMODE", "require") or "require"
+    return f"host={host} port={port} dbname={dbname} user={user} password={password} sslmode={sslmode}"
