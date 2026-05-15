@@ -20,6 +20,9 @@ services:
     ports:
       - "8087:8501"
     volumes:
+      # GAM service-account key — mounté en lecture seule. Le fichier ne quitte
+      # jamais l'hôte et évite les soucis d'échappement de la clé PEM via .env.
+      - ./gam-service-account.json:/app/gam-service-account.json:ro
       # Persist JSON fallback files (used if Supabase ever becomes unreachable)
       - app_data:/app/data
       - ./order_overrides.json:/app/order_overrides.json
