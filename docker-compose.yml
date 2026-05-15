@@ -57,7 +57,7 @@ services:
       ADMINER_DEFAULT_SERVER: postgres
       ADMINER_DESIGN: pepa-linha
     ports:
-      - "8080:8080"
+      - "8088:8080"
     depends_on:
       postgres:
         condition: service_healthy
