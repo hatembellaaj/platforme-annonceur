@@ -19,7 +19,7 @@ from googleads import ad_manager as ad_manager_sdk
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
-DEFAULT_API_VERSION = "v202508"
+DEFAULT_API_VERSION = "v202602"
 
 
 def _get_secret(name: str, default: str = "") -> str:
